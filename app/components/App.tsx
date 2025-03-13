@@ -13,21 +13,45 @@ import {
   useMicrophone,
 } from "../context/MicrophoneContextProvider";
 import Visualizer from "./Visualizer";
+import { analyzeTranscript } from "../utils/voiceCommands";
+import CustomCommandSettings from "./CustomCommandSettings";
+import { initializeOpenAI } from "../utils/llmProcessor";
 
 const App: () => JSX.Element = () => {
   const [caption, setCaption] = useState<string | undefined>(
     "Press spacebar and start speaking"
   );
   const [isTranscribing, setIsTranscribing] = useState<boolean>(false);
+  const [lastCommand, setLastCommand] = useState<string | null>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [isLLMEnabled, setIsLLMEnabled] = useState<boolean>(false);
   const { connection, connectToDeepgram, disconnectFromDeepgram, connectionState } = useDeepgram();
   const { setupMicrophone, microphone, startMicrophone, stopMicrophone, microphoneState } =
     useMicrophone();
   const captionTimeout = useRef<any>();
   const keepAliveInterval = useRef<any>();
   const buttonRef = useRef<HTMLButtonElement>(null);
+  const isProcessingRef = useRef<boolean>(false);  // To prevent multiple simultaneous processing
 
   useEffect(() => {
     setupMicrophone();
+    
+    // Initialize OpenAI with API key (in real app, handle this more securely)
+    const openaiApiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
+    if (openaiApiKey) {
+      try {
+        initializeOpenAI(openaiApiKey);
+        setIsLLMEnabled(true);
+        console.log("LLM functionality enabled");
+      } catch (error) {
+        console.error("Failed to initialize OpenAI:", error);
+        setIsLLMEnabled(false);
+      }
+    } else {
+      console.log("OpenAI API key not found, LLM functionality disabled");
+      setIsLLMEnabled(false);
+    }
+    
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -56,7 +80,7 @@ const App: () => JSX.Element = () => {
       }
     };
 
-    const onTranscript = (data: LiveTranscriptionEvent) => {
+    const onTranscript = async (data: LiveTranscriptionEvent) => {
       const { is_final: isFinal, speech_final: speechFinal } = data;
       let thisCaption = data.channel.alternatives[0].transcript;
 
@@ -64,12 +88,42 @@ const App: () => JSX.Element = () => {
       if (thisCaption !== "") {
         console.log('thisCaption !== ""', thisCaption);
         setCaption(thisCaption);
+        
+        // Process voice commands when we have a final transcript
+        if (isFinal && speechFinal && thisCaption.trim() && !isProcessingRef.current) {
+          isProcessingRef.current = true;
+          
+          try {
+            // Pass the LLM enabled flag to the analyzer
+            const result = await analyzeTranscript(thisCaption, isLLMEnabled);
+            
+            if (result.actionTaken) {
+              // Update UI to show the command was recognized
+              const commandSource = result.source ? ` (via ${result.source})` : '';
+              setLastCommand(`Executed: ${result.command}${commandSource} ${result.data ? JSON.stringify(result.data) : ''}`);
+              
+              // Optionally provide feedback in the caption
+              if (result.command === 'open_website' && result.data?.website) {
+                setCaption(`Command detected: Opening ${result.data.website}`);
+              } else if (result.command === 'search' && result.data?.searchTerm) {
+                setCaption(`Command detected: Searching for "${result.data.searchTerm}"`);
+              } else {
+                setCaption(`Command detected: ${result.command}`);
+              }
+            }
+          } catch (error) {
+            console.error("Error processing transcript:", error);
+          } finally {
+            isProcessingRef.current = false;
+          }
+        }
       }
 
       if (isFinal && speechFinal) {
         clearTimeout(captionTimeout.current);
         captionTimeout.current = setTimeout(() => {
           setCaption("Press spacebar and start speaking");
+          setLastCommand(null);
           clearTimeout(captionTimeout.current);
         }, 3000);
       }
@@ -91,7 +145,7 @@ const App: () => JSX.Element = () => {
       clearTimeout(captionTimeout.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connectionState, isTranscribing]);
+  }, [connectionState, isTranscribing, isLLMEnabled]);
 
   useEffect(() => {
     if (!connection) return;
@@ -165,6 +219,14 @@ const App: () => JSX.Element = () => {
     setCaption("Press spacebar and start speaking");
   };
 
+  const openSettings = () => {
+    setIsSettingsOpen(true);
+  };
+
+  const closeSettings = () => {
+    setIsSettingsOpen(false);
+  };
+
   return (
     <>
       <div className="flex h-full antialiased">
@@ -182,7 +244,75 @@ const App: () => JSX.Element = () => {
                       {caption}
                     </span>
                   )}
+                  
+                  {/* Command feedback */}
+                  {lastCommand && (
+                    <div className="mt-4">
+                      <span className="bg-green-800/70 p-2 rounded-lg text-white text-sm inline-block">
+                        {lastCommand}
+                      </span>
+                    </div>
+                  )}
+                  
+                  {/* LLM Status */}
+                  <div className="mt-2">
+                    <span className={`text-xs ${isLLMEnabled ? 'text-green-500' : 'text-yellow-500'}`}>
+                      {isLLMEnabled ? 'LLM Enhanced Commands: Active ✓' : 'LLM Enhanced Commands: Disabled (API key not set)'}
+                    </span>
+                  </div>
                 </div>
+              </div>
+              
+              {/* Help text for voice commands */}
+              <div className="absolute top-6 left-6 bg-black/50 p-3 rounded-lg max-h-[80vh] overflow-y-auto">
+                <h3 className="text-white text-sm font-bold mb-1">Voice Commands:</h3>
+                
+                <div className="mb-2">
+                  <h4 className="text-white text-xs font-bold">Open Websites:</h4>
+                  <ul className="text-gray-300 text-xs list-disc list-inside">
+                    <li>"Open Netflix" - Opens Netflix in a new tab</li>
+                    <li>"Open YouTube" - Opens YouTube in a new tab</li>
+                    <li>"Open Google" - Opens Google in a new tab</li>
+                    <li>Also try: Facebook, Twitter, Instagram, Amazon</li>
+                  </ul>
+                </div>
+                
+                <div className="mb-2">
+                  <h4 className="text-white text-xs font-bold">Search Web:</h4>
+                  <ul className="text-gray-300 text-xs list-disc list-inside">
+                    <li>"Search for cats" - Google search for cats</li>
+                    <li>"Look up recipe for pasta" - Search for pasta recipes</li>
+                    <li>"Find information about Mars" - Search for Mars</li>
+                  </ul>
+                </div>
+                
+                <div className="mb-2">
+                  <h4 className="text-white text-xs font-bold">Browser Controls:</h4>
+                  <ul className="text-gray-300 text-xs list-disc list-inside">
+                    <li>"Go back" - Navigate to previous page</li>
+                    <li>"Go forward" - Navigate to next page</li>
+                    <li>"Reload" or "Refresh" - Reload current page</li>
+                    <li>"New tab" - Open a new blank tab</li>
+                    <li>"Close tab" - Attempt to close current tab</li>
+                  </ul>
+                </div>
+                
+                {isLLMEnabled && (
+                  <div className="mb-2">
+                    <h4 className="text-white text-xs font-bold">LLM Enhanced Commands:</h4>
+                    <p className="text-gray-300 text-xs">
+                      Natural language commands are enabled! Try speaking naturally, 
+                      like "I want to watch some videos" or "Could you find me information about climate change?"
+                    </p>
+                  </div>
+                )}
+                
+                <button 
+                  onClick={openSettings}
+                  className="mt-2 w-full py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded"
+                >
+                  Add Custom Commands
+                </button>
               </div>
               
               {/* Status indicator in bottom right */}
@@ -210,6 +340,9 @@ const App: () => JSX.Element = () => {
           </div>
         </div>
       </div>
+      
+      {/* Custom Command Settings Modal */}
+      <CustomCommandSettings isOpen={isSettingsOpen} onClose={closeSettings} />
     </>
   );
 };
