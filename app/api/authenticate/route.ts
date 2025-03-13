@@ -4,53 +4,68 @@ import { NextResponse, type NextRequest } from "next/server";
 export const revalidate = 0;
 
 export async function GET(request: NextRequest) {
+  console.log("API Key from env:", process.env.DEEPGRAM_API_KEY ? "Present (length: " + process.env.DEEPGRAM_API_KEY.length + ")" : "Missing");
+  
   // exit early so we don't request 70000000 keys while in devmode
   if (process.env.DEEPGRAM_ENV === "development") {
+    console.log("Development mode, returning API key directly");
     return NextResponse.json({
       key: process.env.DEEPGRAM_API_KEY ?? "",
     });
   }
 
-  // gotta use the request object to invalidate the cache every request :vomit:
-  const url = request.url;
-  const deepgram = createClient(process.env.DEEPGRAM_API_KEY ?? "");
+  try {
+    // gotta use the request object to invalidate the cache every request :vomit:
+    const url = request.url;
+    console.log("Creating Deepgram client with API key");
+    const deepgram = createClient(process.env.DEEPGRAM_API_KEY ?? "");
 
-  let { result: projectsResult, error: projectsError } =
-    await deepgram.manage.getProjects();
+    console.log("Getting projects");
+    let { result: projectsResult, error: projectsError } =
+      await deepgram.manage.getProjects();
 
-  if (projectsError) {
-    return NextResponse.json(projectsError);
-  }
+    if (projectsError) {
+      console.error("Error getting projects:", projectsError);
+      return NextResponse.json(projectsError);
+    }
 
-  const project = projectsResult?.projects[0];
+    const project = projectsResult?.projects[0];
 
-  if (!project) {
-    return NextResponse.json(
-      new DeepgramError(
-        "Cannot find a Deepgram project. Please create a project first."
-      )
+    if (!project) {
+      console.error("No Deepgram project found");
+      return NextResponse.json(
+        new DeepgramError(
+          "Cannot find a Deepgram project. Please create a project first."
+        )
+      );
+    }
+
+    console.log("Creating temporary project key");
+    let { result: newKeyResult, error: newKeyError } =
+      await deepgram.manage.createProjectKey(project.project_id, {
+        comment: "Temporary API key",
+        scopes: ["usage:write"],
+        tags: ["next.js"],
+        time_to_live_in_seconds: 60,
+      });
+
+    if (newKeyError) {
+      console.error("Error creating temporary key:", newKeyError);
+      return NextResponse.json(newKeyError);
+    }
+
+    console.log("Temporary key created successfully");
+    const response = NextResponse.json({ ...newKeyResult, url });
+    response.headers.set("Surrogate-Control", "no-store");
+    response.headers.set(
+      "Cache-Control",
+      "s-maxage=0, no-store, no-cache, must-revalidate, proxy-revalidate"
     );
+    response.headers.set("Expires", "0");
+
+    return response;
+  } catch (error) {
+    console.error("Unexpected error in authenticate route:", error);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
-
-  let { result: newKeyResult, error: newKeyError } =
-    await deepgram.manage.createProjectKey(project.project_id, {
-      comment: "Temporary API key",
-      scopes: ["usage:write"],
-      tags: ["next.js"],
-      time_to_live_in_seconds: 60,
-    });
-
-  if (newKeyError) {
-    return NextResponse.json(newKeyError);
-  }
-
-  const response = NextResponse.json({ ...newKeyResult, url });
-  response.headers.set("Surrogate-Control", "no-store");
-  response.headers.set(
-    "Cache-Control",
-    "s-maxage=0, no-store, no-cache, must-revalidate, proxy-revalidate"
-  );
-  response.headers.set("Expires", "0");
-
-  return response;
 }
